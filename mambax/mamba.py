@@ -20,7 +20,9 @@ class Mamba(nn.Module):
         d_conv=4,
         d_state=16,
         dt_rank=64,
-        act=nn.SiLU()
+        bias=False,
+        conv_bias=False,
+        use_cuda=False
     ):
         super().__init__()
         self.d_model = d_model
@@ -28,15 +30,15 @@ class Mamba(nn.Module):
         self.d_conv = d_conv
         self.d_state = d_state
         self.dt_rank = dt_rank
-        self.act = act
+        self.act = nn.SiLU()
 
         # Projections
-        self.in_proj = nn.Linear(d_model, 2 * d_inner, bias=False)
+        self.in_proj = nn.Linear(d_model, 2 * d_inner, bias=bias)
         self.conv1d = nn.Conv1d(
             d_inner,
             d_inner,
             kernel_size=d_conv,
-            bias=False,
+            bias=conv_bias,
             groups=d_inner,
             padding=d_conv - 1
         )
@@ -64,8 +66,17 @@ class Mamba(nn.Module):
         self.D._no_weight_decay = True
 
         # Output projections
-        self.out_proj = nn.Linear(d_inner, d_model, bias=False)
+        self.out_proj = nn.Linear(d_inner, d_model, bias=bias)
         self.drop = nn.Dropout(0.1)
+        if use_cuda:
+            try:
+                from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+                self.selective_scan_fn_cuda = selective_scan_fn
+                self.use_cuda = True
+            except ImportError:
+                self.selective_scan_fn_cuda = None
+                self.use_cuda = False
+        self.use_cuda = use_cuda
 
     def forward(self, x, h0=None, conv_cache=None, onnx_export=True):
         """Forward pass of Mamba block.
@@ -80,6 +91,9 @@ class Mamba(nn.Module):
             return self._forward_full(x)
         else:
             return self._forward_cumprod(x, h0, conv_cache, onnx_export)
+        
+
+
 
     def _forward_cumprod(self, x, h0=None, conv_cache=None, onnx_export=True):
       
@@ -88,7 +102,7 @@ class Mamba(nn.Module):
 
         x_cat = torch.cat([conv_cache, x_part.transpose(1, 2)], dim=2)  # (B, ED, d_conv-1+Lc)
         x_conv = F.conv1d(
-            x_cat, self.conv1d.weight, groups=self.d_inner
+            x_cat, self.conv1d.weight, bias=self.conv1d.bias, groups=self.d_inner
         )  # (B, ED, Lc)
         x_conv = self.act(x_conv.transpose(1, 2))  # (B, Lc, ED)
 
@@ -139,15 +153,20 @@ class Mamba(nn.Module):
         x = x.transpose(1, 2)
         x = self.act(x)
         
-        y = self.ssm(x)
-        z = self.act(z)
+        y = self.ssm(x, z)
 
-        out = self.out_proj(y * z)
+        if self.use_cuda:
+            out = self.out_proj(y)
+        else:
+            z = self.act(z)
+            out = self.out_proj(y * z)
+
         if self.training:
             out = self.drop(out)
+
         return out
 
-    def ssm(self, x):
+    def ssm(self, x, z):
         A = -torch.exp(self.A_log.float())
         D = self.D
         
@@ -159,10 +178,22 @@ class Mamba(nn.Module):
         )
         
         delta = self.dt_proj.weight @ delta.transpose(1, 2)
-        delta = delta.transpose(1, 2)
-        delta = F.softplus(delta + self.dt_proj.bias)
-        
-        y = self.selective_scan(x, delta, A, B, C, D)
+
+
+        if self.use_cuda:
+
+            x = x.transpose(1, 2)
+            B = B.transpose(1, 2)
+            C = C.transpose(1, 2)
+            z = z.transpose(1, 2)
+            y = self.selective_scan_fn_cuda(x, delta, A, B, C, D, z=z, delta_softplus=True, delta_bias=self.dt_proj.bias.float())
+            y = y.transpose(1, 2) 
+        else:
+
+            delta = delta.transpose(1, 2)
+            delta = F.softplus(delta + self.dt_proj.bias)
+            y = self.selective_scan(x, delta, A, B, C, D)
+
         return y
 
     def selective_scan(self, x, delta, A, B, C, D):
@@ -173,3 +204,4 @@ class Mamba(nn.Module):
         hs = pscan(deltaA, BX)
         y = (hs @ C.unsqueeze(-1)).squeeze(3)
         return y + D * x
+
