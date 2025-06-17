@@ -6,6 +6,14 @@ PyTorch implementation of the Mamba architecture with enhanced production-ready 
 2. **Chunk Processing** - Single-forwardpass chunk handling (no token loops)
 3. **CPU-First** - Optimized execution without CUDA dependencies
 
+## Installation
+
+Install the package directly from PyPI:
+
+```bash
+pip install mambax
+```
+
 ## Key Advantages
 
 - **Production Ready**: ONNX-compatible for serving
@@ -21,7 +29,7 @@ Builds upon reference work from [alxndrTL/mamba.py](https://github.com/alxndrTL/
 ```python
 import torch
 import torch.nn as nn
-from mamba import Mamba
+from mambax import Mamba
 
 # Initialize model
 model = Mamba(
@@ -34,7 +42,7 @@ model = Mamba(
 )
 
 # Process full sequence
-x = torch.rand(1, 13, 512)  # (batch, seq_len, dim)
+x = torch.rand(1, 128, 512)  # (batch, seq_len, dim)
 output = model(x)  # single forward pass
 ```
 
