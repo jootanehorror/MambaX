@@ -38,7 +38,7 @@ model = Mamba(
     d_conv=4,
     d_state=16,
     dt_rank=64,
-    act=nn.SiLU()
+    use_cuda=False
 )
 
 # Process full sequence
